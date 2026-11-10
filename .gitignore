@@ -1,0 +1,29 @@
+# ---- 实验产物：体积过大，不入库 ----
+results/
+# 若想保留少量小结果文件，可取消注释并改成需要的路径：
+# !results/**/metrics.json
+# !results/**/summary.csv
+
+# ---- 数组 / 模型权重等二进制产物 ----
+*.npy
+*.npz
+*.pth
+*.pt
+*.ckpt
+*.h5
+*.bin
+
+# ---- 日志 ----
+*.log
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.ipynb_checkpoints/
+
+# ---- 系统 ----
+.DS_Store
+Thumbs.db
