@@ -14,7 +14,7 @@
 \usepackage{algorithm}
 \usepackage{algorithmic}
 \usepackage{hyperref}
-\usepackage[capitalize,noabbrev]{cleveref}
+\newcommand{\theHalgorithm}{\arabic{algorithm}}
 \usepackage{icml2026}
 
 \newcommand{\method}{\textsc{FedTDO}}
@@ -34,8 +34,11 @@
 \icmltitle{FedTDO: Budgeted Expert-Capsule Transfer for Drift-Aware Federated Time-Series Forecasting}
 
 \begin{icmlauthorlist}
-  \icmlauthor{Anonymous Authors}{}
+  \icmlauthor{Anonymous Authors}{anon}
 \end{icmlauthorlist}
+
+\icmlaffiliation{anon}{Anonymous Institution, Anonymous City, Anonymous Region, Anonymous Country}
+\icmlcorrespondingauthor{Anonymous Author}{anon@domain.invalid}
 
 \icmlkeywords{Federated Learning, Time-Series Forecasting, Concept Drift, Mixture of Experts}
 
@@ -80,8 +83,8 @@ Sparse mixture-of-experts architectures activate a subset of experts for each in
 \section{Problem Setup}
 
 Consider \(N\) clients. Client \(i\) observes a private multivariate series \(X_i\), and at forecast origin \(t\) receives a context window
-\[
-  x_{i,t}\in\R^{L\times d_i}
+\begin{equation}
+x_{i,t}\in\R^{L\times d_i}
 \]
 and predicts a horizon
 \[
@@ -110,24 +113,24 @@ Each client uses a Dynamic-TMoE-style forecaster. Given an input window, reversi
  + \bigl(\operatorname{GELU}(W_n p_j)\odot W_\ell p_j\bigr)
  + \operatorname{PE}(j),
  \label{eq:patch}
-\]
+\end{equation}
 followed by dropout. Here \(W_v\), \(W_n\), and \(W_\ell\) are learned projections and \(\operatorname{PE}\) is a sinusoidal positional embedding.
 
 The embedded patches are processed by temporal dynamic-MoE layers. Each layer contains a temporal-memory router, a pool of heterogeneous expert functions, and an output projection with a residual connection. The base expert types in the implementation are identity, trend, seasonality, and fluctuation. The router selects a top-\(k\) subset of the enabled experts. The MMD drift detector monitors online embeddings and exposes a bounded drift score to the transfer controller. In the supplied command configuration, the model parser defaults to four base experts, top-\(k=2\), one temporal-MoE layer, and zero additional drift experts unless those values are overridden; the presence of the detector should therefore not be interpreted as evidence that a nonzero drift-expert pool is active.
 
 The default federation topology shares only \texttt{patch\_embedding}. Given local copies \(\theta_i^{(r)}\) after the warm-up stage, the server computes a uniform parameter average:
-\[
- \theta_s =
+\begin{equation}
+\theta_s =
  \frac{1}{N}\sum_{i=1}^{N}\theta_i^{(r)}.
  \label{eq:fedavg}
-\]
+\end{equation}
 The synchronized module is then frozen in the canonical \texttt{fedtdo} control. The remaining model parameters---including temporal routers, expert pools, normalization parameters, and prediction projections---remain client-local. This one-shot synchronization is a representation-alignment step; it is not equivalent to repeatedly averaging the complete model throughout downstream training.
 
 \subsection{Typed expert capsules}
 
 After local training, client \(j\) can publish a capsule
-\[
- c_{j,e} =
+\begin{equation}
+c_{j,e} =
  (u_{j,e},\,j,\,\tau_{j,e},\,\ell_{j,e},\,d,\,P',\,v,\,\omega_{j,e}),
 \]
 where \(u_{j,e}\) is the expert identifier, \(j\) the source client, \(\tau_{j,e}\) the expert type, \(\ell_{j,e}\) the MoE layer index, \(d\) the embedding width, \(P'\) the number of patches, \(v\) the shared-encoder version, and \(\omega_{j,e}\) the transferable state dictionary. A capsule is eligible for client \(i\) only when its layer, dimensions, patch count, and encoder version match the requester's model signature.
@@ -146,26 +149,26 @@ Let \(\mathcal{C}_{i,t}\) be the compatible capsule set for client \(i\) at orig
  + \beta r_{i,t}(c)
  - \lambda_{\mathrm{eval}}\,C_{i,t}^{\mathrm{eval}}(c),
  \label{eq:probe}
-\]
+\end{equation}
 where \(\widehat{\mu}\) is the estimated gain, \(r\) is an uncertainty radius, and \(C^{\mathrm{eval}}\) accounts for estimated forward-pass FLOPs and, if the capsule is not cached, its download size. The implementation uses a deterministic proxy for FLOPs and explicit byte accounting; it records wall-clock latency separately.
 
 The gain history is discounted by elapsed online steps and accumulated drift. For an observation of candidate \(c\) made at step \(s\), its weight at current step \(t\) is
-\[
- w_{i,c,s}(t)
+\begin{equation}
+w_{i,c,s}(t)
  =
  \exp\!\left(
   -\eta_{\mathrm{age}}(t-s)
   -\eta_{\mathrm{drift}}\,[D_i(t)-D_i(s)]_+
  \right),
  \label{eq:weight}
-\]
+\end{equation}
 where \(D_i(t)\) is the cumulative bounded drift signal. The default gain estimator is a weighted mean; the code also exposes winsorized, upper-tail, and quantile estimators as alternatives. Regime memory stores candidate gains with hidden-state signatures. When a sufficiently similar signature recurs, the corresponding historical gain can enter the estimator as a similarity-weighted pseudo-observation rather than as a new observation.
 
 \subsection{Ranked evidence gate for deployment}
 
 Shadow evaluation and deployment are separate decisions. For each eligible candidate, the controller computes a deployment score that subtracts transfer and switching costs from its estimated gain. Under the evidence configuration, the score is
-\[
- s_{i,t}(c)
+\begin{equation}
+s_{i,t}(c)
  =
  \widehat{\mu}_{i,t}(c)
  - \lambda_{\mathrm{transfer}}C_{i,t}^{\mathrm{transfer}}(c)
@@ -174,20 +177,20 @@ Shadow evaluation and deployment are separate decisions. For each eligible candi
  - m_{\mathrm{switch}}\,
    \mathbb{I}\{c\ne c_{i,t-1}\},
  \label{eq:deployscore}
-\]
+\end{equation}
 where \(c_{i,t-1}\) is the currently deployed capsule and \(m_{\mathrm{switch}}\) is an optional switching margin. The local model is the fallback action.
 
 The \texttt{ranked} gate sorts candidates by \(s_{i,t}\) and tests them in that order. Let \(g_{i,c,s}\) be the paired gain of candidate \(c\) relative to the local prediction on a released feedback unit. For the latest \(k\) observations, the gate computes
-\[
- \bar g_{i,c}=\frac{1}{k}\sum_{j=1}^{k}g_j,\qquad
+\begin{equation}
+\bar g_{i,c}=\frac{1}{k}\sum_{j=1}^{k}g_j,\qquad
  T_{i,c}=
  \begin{cases}
- \bar g_{i,c}/(s_{i,c}/\sqrt{k}), & s_{i,c}>0,\\
+ \bar g_{i,c}/(\hat{\sigma}_{i,c}/\sqrt{k}), & s_{i,c}>0,\\
  +\infty, & s_{i,c}=0\ \text{and}\ \bar g_{i,c}>0,\\
  -\infty, & \text{otherwise},
  \end{cases}
  \label{eq:ttest}
-\]
+\end{equation}
 where \(s_{i,c}\) is the sample standard deviation of the \(k\) gains. A candidate passes if \(\bar g_{i,c}>0\) and \(T_{i,c}\ge \tau\). The controller deploys the first passing candidate whose deployment score exceeds the local fallback threshold. If no candidate passes, it retains the local model.
 
 For the supplied configuration, \(k=4\) and \(\tau=1\). This threshold is a heuristic t-statistic cutoff, not a calibrated significance level. The checked-in implementation does not expose \(\alpha\), Holm, BH, or a HAC lag for this gate. Consequently, \method's \texttt{ranked} configuration must not be described as controlling FWER or as using a Newey--West covariance estimator. Moreover, because candidates are examined sequentially, any formal multiple-testing guarantee would require a separate derivation and implementation.
@@ -195,27 +198,27 @@ For the supplied configuration, \(k=4\) and \(\tau=1\). This threshold is a heur
 \subsection{Causal prequential adaptation}
 
 Let a forecast at origin \(t\) cover \(H\) future steps. Under full-horizon feedback, the complete target is released only after the final horizon label is observable. Under first-step feedback, only the first target coordinate is released at the next origin. The permitted feedback at release time \(r\) is therefore
-\[
- y_{i,t}^{(r)}
+\begin{equation}
+y_{i,t}^{(r)}
  =
  \begin{cases}
  y_{i,t,1}, & \text{first-step protocol},\\
  (y_{i,t,1},\ldots,y_{i,t,H}), & \text{full-horizon protocol and }r\ge t+H.
  \end{cases}
  \label{eq:prefix}
-\]
+\end{equation}
 Every online statistic must be computed from \(y_{i,t}^{(r)}\), not from the unreleased suffix.
 
 For an external expert forecast \(f_c(x_{i,t})\) and local forecast \(f_0(x_{i,t})\), the deployed forecast is a convex blend
-\[
- \widehat y_{i,t}
+\begin{equation}
+\widehat y_{i,t}
  =
  f_0(x_{i,t})
  + \alpha_{i,c}
    \bigl(f_c(x_{i,t})-f_0(x_{i,t})\bigr),
  \qquad \alpha_{i,c}\in[0,1].
  \label{eq:blend}
-\]
+\end{equation}
 The implementation can estimate \(\alpha_{i,c}\) by least-squares projection of the observed residual onto the external-minus-local forecast difference, using only already released targets. Before the minimum calibration count is reached, it uses the configured prior mixing weight. The online optimizer is SGD with client-specific optimizer state; the supplied command uses learning rate \(10^{-4}\), one substep, and first-step targets. Gradient clipping is disabled for the non-ILI configuration and set to 1 for ILI.
 
 \begin{algorithm}[t]
