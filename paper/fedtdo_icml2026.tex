@@ -16,6 +16,7 @@
 \usepackage{hyperref}
 \newcommand{\theHalgorithm}{\arabic{algorithm}}
 \usepackage{icml2026}
+\usepackage[capitalize,noabbrev]{cleveref}
 
 \newcommand{\method}{\textsc{FedTDO}}
 \newcommand{\mse}{\operatorname{MSE}}
@@ -185,13 +186,20 @@ The \texttt{ranked} gate sorts candidates by \(s_{i,t}\) and tests them in that 
 \bar g_{i,c}=\frac{1}{k}\sum_{j=1}^{k}g_j,\qquad
  T_{i,c}=
  \begin{cases}
- \bar g_{i,c}/(\hat{\sigma}_{i,c}/\sqrt{k}), & s_{i,c}>0,\\
- +\infty, & s_{i,c}=0\ \text{and}\ \bar g_{i,c}>0,\\
+ \bar g_{i,c}/(\hat{\sigma}_{i,c}/\sqrt{k}), & \hat{\sigma}_{i,c}>0,\\
+ +\infty, & \hat{\sigma}_{i,c}=0\ \text{and}\ \bar g_{i,c}>0,\\
  -\infty, & \text{otherwise},
  \end{cases}
  \label{eq:ttest}
 \end{equation}
-where \(s_{i,c}\) is the sample standard deviation of the \(k\) gains. A candidate passes if \(\bar g_{i,c}>0\) and \(T_{i,c}\ge \tau\). The controller deploys the first passing candidate whose deployment score exceeds the local fallback threshold. If no candidate passes, it retains the local model.
+where \(\hat{\sigma}_{i,c}\) is the sample standard deviation of the \(k\) gains. In the supplied command's default client settings, the reward basis is the deployed local/external blend and the gain mode is relative:
+\[
+ g_{i,c,t}
+ =
+ \frac{\ell_{i,t}^{\mathrm{local}}-\ell_{i,t}^{\mathrm{blend}(c)}}
+      {\max(\ell_{i,t}^{\mathrm{local}},\epsilon)}.
+\]
+The t gate uses the latest \(k\) gains without the age/drift weights used by the ranking estimator. A candidate passes if \(\bar g_{i,c}>0\) and \(T_{i,c}\ge \tau\). The controller deploys the first passing candidate whose deployment score exceeds the local fallback threshold. If no candidate passes, it retains the local model.
 
 For the supplied configuration, \(k=4\) and \(\tau=1\). This threshold is a heuristic t-statistic cutoff, not a calibrated significance level. The checked-in implementation does not expose \(\alpha\), Holm, BH, or a HAC lag for this gate. Consequently, \method's \texttt{ranked} configuration must not be described as controlling FWER or as using a Newey--West covariance estimator. Moreover, because candidates are examined sequentially, any formal multiple-testing guarantee would require a separate derivation and implementation.
 
