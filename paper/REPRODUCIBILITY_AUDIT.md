@@ -213,3 +213,9 @@ The issues that can invalidate the headline experimental claim or block submissi
 7. High — missing experimental evidence: no verified raw results were found in the inspected snapshot; tables must remain placeholders until reruns and log validation.
 
 These are separate problems; fixing one does not fix the others.
+
+
+## 15. The supplied baseline command does not cover the supplied main-method datasets
+
+The concrete baseline command in the user-provided specification is for ECL with 32 clients. The FedTDO main examples are ETTh1 with 7 clients and ILI with 7 clients; the batch comparison script names ECL and Traffic. These are not direct baseline cells for ETTh1/ILI. A paper table comparing FedTDO on ETTh1 or ILI against that ECL/Traffic FedProx run would be invalid. Each dataset/horizon in the main table needs its own baseline run with the same channel selection, client count, split, forecast origins, and feedback regime. Keep ECL/Traffic results in a separate dataset block.
+
