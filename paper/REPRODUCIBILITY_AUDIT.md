@@ -168,3 +168,48 @@ select_probes() 最多返回四个 shadow probe，但 FedTDOClient.predict() 还
 ## 10. 稿件和 ICML 模板说明
 
 稿件 fedtdo_icml2026.tex 使用仓库中的 ICML 2026 style package，并在结果表保留 TBD。ICML 2026 初始投稿主文上限为 8 页（参考文献和附录另计），投稿必须匿名；正式提交前还需要确认作者信息、匿名化代码材料、最终 PDF 页数和官方格式检查。官方说明见 [ICML 2026 Author Instructions](https://icml.cc/Conferences/2026/AuthorInstructions)。
+
+
+## 11. Newly identified: FedTDO and FedProx online feedback protocols are not matched
+
+The supplied FedTDO command sets --fedtdo_online_target first. In Exp_FedTDO.run(), this schedules feedback after one origin (feedback_delay = 1), and _online_step() slices the target to its first coordinate. By contrast, the supplied baseline command uses --fl_online_lr 0.0001; the baseline parser's help text explicitly describes this as an SGD update on a stored full-horizon target after its final label arrives at origin t + pred_len. Thus, even if both commands use 1920 stream batches and the same nominal learning rate, the online adaptation information set and update timing differ:
+
+- FedTDO: one-step target, next-origin feedback/update;
+- FedProx: full-H target, delayed until the final horizon label arrives.
+
+This is a material protocol confound. A comparison cannot be called "same online protocol" or attribute a performance difference solely to federated transfer. Either make both arms use the same released prefix and delay (including their controller/selection feedback), or report the different feedback regimes explicitly and add matched-protocol controls. Also verify that both arms count stream windows and gradient updates identically rather than assuming equal 1920 caps imply equal realized work.
+
+Code references:
+- FedTDO target mode and release scheduling: [exp_fedtdo.py](https://github.com/weer2004/FedTDO/blob/main/code/exp/exp_fedtdo.py#L607-L675)
+- FedTDO prefix slicing: [exp_fedtdo.py](https://github.com/weer2004/FedTDO/blob/main/code/exp/exp_fedtdo.py#L789-L845)
+- Baseline full-horizon online update contract: [run_baselines.py](https://github.com/weer2004/FedTDO/blob/main/code/run_baselines.py#L133-L139)
+
+## 12. Newly identified: the current LaTeX source has mismatched display-math environments
+
+A structural scan of paper/fedtdo_icml2026.tex finds display delimiters that cross environment boundaries. For example, the patch-embedding formula opens with \[ but closes with \end{equation}; other formulae open with \begin{equation} and close with \]. The aggregate counts happen to show eight equation begins and ends and five \[ / \] pairs, but the nesting/order is invalid. This is a LaTeX build blocker, not merely a style issue. Labels placed inside \[...\] also will not behave as numbered equation labels.
+
+Before claiming the manuscript is buildable:
+1. Convert each labelled display to a properly paired \begin{equation}...\end{equation} block.
+2. Keep unlabelled displays consistently as \[...\].
+3. Run latexmk (or the official ICML build sequence) with BibTeX until there are no undefined references, duplicate labels, or fatal errors.
+4. Inspect the generated PDF and count the main-body pages separately from references/appendix.
+
+The previous file checks only confirmed that the expected text files existed and could be read back from GitHub; they did not compile the TeX source. Do not describe the LaTeX as compile-verified.
+
+## 13. Initial-submission anonymization and repository exposure
+
+The manuscript source uses anonymous author macros, but the draft branch is inside the identifiable public repository weer2004/FedTDO, and the manuscript's audit explicitly points to the named main repository and line-level source URLs. ICML's double-blind policy says not to include non-anonymized public-repository links in the submission and expects supplementary code to be anonymized; an anonymous GitHub repository is an allowed route. The current branch is suitable as an internal drafting workspace, not as the anonymous code artifact to submit. Prepare a separate anonymized repository/archive and remove repository-identifying URLs, acknowledgements, and identifying metadata from the submitted PDF and supplementary material. See the official ICML 2026 Author Instructions.
+
+## 14. Updated severity ordering
+
+The issues that can invalidate the headline experimental claim or block submission are now:
+
+1. Critical — first-prefix feedback leakage: future horizon labels affect candidate gains/controller feedback despite first-step release.
+2. Critical — unmatched baseline feedback regime: FedTDO is first-step/next-origin while the supplied FedProx online update is full-horizon/delayed.
+3. Critical — LaTeX build blocker: display-math environments are crossed/mismatched; no successful PDF build has been verified.
+4. High — unsupported CLI options: the supplied command fails against current main because several flags are absent/renamed.
+5. High — training/aggregation schedule mismatch: one-shot shared-module synchronization is not the baseline's repeated FedProx rounds.
+6. High — anonymous submission packaging: the public named repository and source links cannot simply be carried into the double-blind submission.
+7. High — missing experimental evidence: no verified raw results were found in the inspected snapshot; tables must remain placeholders until reruns and log validation.
+
+These are separate problems; fixing one does not fix the others.
