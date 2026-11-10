@@ -1,0 +1,356 @@
+%%%%%%%% ICML 2026 manuscript draft: FedTDO %%%%%%%%
+
+\documentclass{article}
+
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{mathtools}
+\usepackage{amsthm}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{hyperref}
+\usepackage[capitalize,noabbrev]{cleveref}
+\usepackage{icml2026}
+
+\newcommand{\method}{\textsc{FedTDO}}
+\newcommand{\mse}{\operatorname{MSE}}
+\newcommand{\clip}{\operatorname{clip}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\TBD}{\texttt{TBD}}
+
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+
+\icmltitlerunning{FedTDO: Budgeted Expert-Capsule Transfer}
+
+\begin{document}
+
+\twocolumn[
+\icmltitle{FedTDO: Budgeted Expert-Capsule Transfer for Drift-Aware Federated Time-Series Forecasting}
+
+\begin{icmlauthorlist}
+  \icmlauthor{Anonymous Authors}{}
+\end{icmlauthorlist}
+
+\icmlkeywords{Federated Learning, Time-Series Forecasting, Concept Drift, Mixture of Experts}
+
+\vskip 0.3in
+]
+
+\printAffiliationsAndNotice{}
+
+\begin{abstract}
+Federated time-series forecasting must cope with two coupled sources of difficulty: clients observe heterogeneous signals, and the predictive relationships within each client can change over time. We study \method, a framework that combines a federated patch representation with client-local temporal mixture-of-experts models and selectively transferable expert capsules. A client evaluates only a bounded number of candidate capsules through shadow forecasts, discounts historical gains by age and detected drift, and migrates only when a ranked evidence gate accepts a candidate. The framework also supports delayed-label online adaptation while keeping raw time-series windows at their originating clients. We provide an implementation-grounded protocol for channel-partitioned forecasting and specify the checks required for a strictly causal first-step feedback stream; empirical performance claims are intentionally left open until the repository's command and feedback-path inconsistencies are resolved and the experiments are rerun.
+\end{abstract}
+
+\section{Introduction}
+
+Time-series forecasters are deployed in settings where measurements are distributed across devices, buildings, sensors, or organizations. Pooling all observations at a central location may be undesirable or infeasible, while training each forecaster in isolation discards information that could be useful to another client. Federated learning addresses the first issue by coordinating local optimization without collecting raw training examples centrally \citep{mcmahan2017communication,li2020federated}. It does not, by itself, determine \emph{what} should be shared when clients observe different variables, nor \emph{when} a model component that was useful in the past remains useful under temporal drift.
+
+These questions are particularly important for non-stationary forecasting. A shared full model can be a poor fit for a client whose signal has a different amplitude, seasonality, or operating regime. Conversely, a fully local model cannot immediately exploit a temporal pattern learned by another client. Sharing every parameter is also more expensive than transferring a small reusable component, and selecting a transferred component from noisy short-horizon feedback can amplify winner's-curse effects.
+
+We investigate \method, a federated transfer framework built around \emph{expert capsules}. Each client trains a temporal mixture-of-experts forecaster on its private channel. The clients federate a selected patch-embedding module to establish a common representation space, while keeping their routers, experts, normalization state, and forecasting heads local. A client publishes compatible expert cores as capsules. A requesting client maintains a bounded candidate-evaluation budget, produces counterfactual shadow forecasts for selected capsules, and uses observed gains to decide whether to retain its local path or deploy a transferred expert. A drift signal and recency weighting make old observations progressively less influential.
+
+The checked-in implementation also contains several distinct mechanisms that should not be conflated. The exploratory score used to allocate shadow evaluations is optimistic and cost-aware. The deployment score is a separate decision. In the evidence configuration, candidates are ranked by estimated gain net of transfer and switching costs, then tested in that order using a one-sided statistic over the most recent paired gains. This is a sequential feasibility heuristic; it is not a Holm or Benjamini--Hochberg procedure and does not provide a family-wise error-rate guarantee.
+
+Our contributions are:
+\begin{itemize}
+    \item We formulate selective cross-client transfer at the level of typed expert capsules, rather than requiring clients to exchange complete forecasting models.
+    \item We describe a two-stage controller that separates budgeted counterfactual evaluation from deployment, and incorporates evaluation cost, transfer cost, observation age, and drift.
+    \item We give a prequential evaluation protocol for delayed labels and identify the exact implementation invariants required for first-step feedback to be causal.
+    \item We provide an executable experiment specification and a reproducibility audit that distinguishes supported settings from command-line options and protocol assumptions that are not implemented in the inspected repository revision.
+\end{itemize}
+
+\section{Related Work}
+
+\paragraph{Federated optimization.}
+FedAvg aggregates locally optimized model parameters and provides a practical baseline for decentralized learning \citep{mcmahan2017communication}. FedProx adds a proximal regularizer to mitigate statistical and systems heterogeneity \citep{li2020federated}. These approaches primarily specify how model parameters are optimized and aggregated. \method instead asks which submodule should be synchronized and which client-specific component should be transferred at inference time.
+
+\paragraph{Time-series representations and normalization.}
+Patch-based encoders expose local temporal segments as model tokens and have proved effective for long-horizon forecasting \citep{nie2023time}. Reversible instance normalization reduces sensitivity to per-instance level and scale shifts \citep{kim2022reversible}. The forecaster used here combines a patch embedding with reversible normalization; the embedding is the default federated module, while the remaining forecasting components are private.
+
+\paragraph{Mixture of experts and drift adaptation.}
+Sparse mixture-of-experts architectures activate a subset of experts for each input \citep{shazeer2017outrageously}. Dynamic TMoE combines temporal-memory routing, heterogeneous experts, and MMD-based drift monitoring for non-stationary time-series forecasting \citep{zhu2026dynamictmoe}. Concept-drift adaptation has a long history in streaming learning \citep{gama2014survey}; MMD provides a kernel-based way to compare distributions \citep{gretton2012kernel}. Our focus is complementary: rather than only adapting a single client's expert pool, we define a federation protocol for publishing, evaluating, and selectively deploying compatible expert components across clients.
+
+\section{Problem Setup}
+
+Consider \(N\) clients. Client \(i\) observes a private multivariate series \(X_i\), and at forecast origin \(t\) receives a context window
+\[
+  x_{i,t}\in\R^{L\times d_i}
+\]
+and predicts a horizon
+\[
+  y_{i,t}\in\R^{H\times d_i}.
+\]
+Here \(L\) is the look-back length, \(H\) is the prediction horizon, and \(d_i\) is the number of channels held by client \(i\). In the channel-partitioned protocol, \(d_i=1\) and each client corresponds to one column of the original data matrix. The client-specific data distribution may vary across \(i\) and over time.
+
+Let \(f_{\theta_s,\phi_i}\) denote client \(i\)'s forecaster, where \(\theta_s\) contains the modules selected for federation and \(\phi_i\) contains private parameters. Training uses local windows and a forecasting loss, with MSE as the principal objective:
+\[
+  \mathcal{L}_i(\theta_s,\phi_i)
+  = \mathbb{E}_{(x,y)\sim\mathcal{D}_i}
+    \left[\mse\!\left(f_{\theta_s,\phi_i}(x),y\right)\right].
+\]
+The server is not given raw input windows or labels. It receives only the declared shared module updates during synchronization and serialized expert capsules during publication. The implementation is a simulation of this protocol; it does not implement differential privacy, secure aggregation, or a cryptographic threat model.
+
+The online objective is prequential: each forecast is issued before its target becomes available. At an origin \(t\), a policy may use only labels whose release time is no later than \(t\). This restriction applies not only to gradient updates but also to candidate scoring, calibration, regime memory, and every statistic that can influence later decisions.
+
+\section{FedTDO}
+
+\subsection{Private temporal forecasters and shared representation}
+
+Each client uses a Dynamic-TMoE-style forecaster. Given an input window, reversible instance normalization produces normalized values and per-instance statistics. The normalized series is divided into overlapping patches of length \(P\) and stride \(S\), with replication padding at the right boundary. For a patch vector \(p_j\), the patch embedding in the inspected implementation is
+\[
+ e_j =
+ W_v p_j
+ + \bigl(\operatorname{GELU}(W_n p_j)\odot W_\ell p_j\bigr)
+ + \operatorname{PE}(j),
+ \label{eq:patch}
+\]
+followed by dropout. Here \(W_v\), \(W_n\), and \(W_\ell\) are learned projections and \(\operatorname{PE}\) is a sinusoidal positional embedding.
+
+The embedded patches are processed by temporal dynamic-MoE layers. Each layer contains a temporal-memory router, a pool of heterogeneous expert functions, and an output projection with a residual connection. The base expert types in the implementation are identity, trend, seasonality, and fluctuation. The router selects a top-\(k\) subset of the enabled experts. The MMD drift detector monitors online embeddings and exposes a bounded drift score to the transfer controller. In the supplied command configuration, the model parser defaults to four base experts, top-\(k=2\), one temporal-MoE layer, and zero additional drift experts unless those values are overridden; the presence of the detector should therefore not be interpreted as evidence that a nonzero drift-expert pool is active.
+
+The default federation topology shares only \texttt{patch\_embedding}. Given local copies \(\theta_i^{(r)}\) after the warm-up stage, the server computes a uniform parameter average:
+\[
+ \theta_s =
+ \frac{1}{N}\sum_{i=1}^{N}\theta_i^{(r)}.
+ \label{eq:fedavg}
+\]
+The synchronized module is then frozen in the canonical \texttt{fedtdo} control. The remaining model parameters---including temporal routers, expert pools, normalization parameters, and prediction projections---remain client-local. This one-shot synchronization is a representation-alignment step; it is not equivalent to repeatedly averaging the complete model throughout downstream training.
+
+\subsection{Typed expert capsules}
+
+After local training, client \(j\) can publish a capsule
+\[
+ c_{j,e} =
+ (u_{j,e},\,j,\,\tau_{j,e},\,\ell_{j,e},\,d,\,P',\,v,\,\omega_{j,e}),
+\]
+where \(u_{j,e}\) is the expert identifier, \(j\) the source client, \(\tau_{j,e}\) the expert type, \(\ell_{j,e}\) the MoE layer index, \(d\) the embedding width, \(P'\) the number of patches, \(v\) the shared-encoder version, and \(\omega_{j,e}\) the transferable state dictionary. A capsule is eligible for client \(i\) only when its layer, dimensions, patch count, and encoder version match the requester's model signature.
+
+The capsule contains the transferable expert core rather than the full client model. In particular, the implementation removes parameters with the \texttt{relation\_layer.} prefix because those parameters can depend on the source client's channel graph. The registry stores capsules and metadata, not the source client's time series, normalizer, router, or prediction head. A requester lazily materializes a compatible capsule on its device and caches it; a first fetch incurs communication cost, while a subsequent cached evaluation does not incur another download charge.
+
+This design intentionally restricts transfer to a shared representation space. It does not claim that arbitrary experts trained under unrelated encoders are interchangeable.
+
+\subsection{Budgeted shadow evaluation}
+
+Let \(\mathcal{C}_{i,t}\) be the compatible capsule set for client \(i\) at origin \(t\). Evaluating every capsule at every origin is unnecessary and may dominate inference cost. The controller therefore selects at most \(B\) candidates for shadow evaluation. For a previously unobserved candidate, the controller reserves an initial exploration opportunity using a deterministic, identifier-hash tie break. Remaining candidates are ranked by an optimistic score:
+\[
+ q_{i,t}(c)
+ =
+ \widehat{\mu}_{i,t}(c)
+ + \beta r_{i,t}(c)
+ - \lambda_{\mathrm{eval}}\,C_{i,t}^{\mathrm{eval}}(c),
+ \label{eq:probe}
+\]
+where \(\widehat{\mu}\) is the estimated gain, \(r\) is an uncertainty radius, and \(C^{\mathrm{eval}}\) accounts for estimated forward-pass FLOPs and, if the capsule is not cached, its download size. The implementation uses a deterministic proxy for FLOPs and explicit byte accounting; it records wall-clock latency separately.
+
+The gain history is discounted by elapsed online steps and accumulated drift. For an observation of candidate \(c\) made at step \(s\), its weight at current step \(t\) is
+\[
+ w_{i,c,s}(t)
+ =
+ \exp\!\left(
+  -\eta_{\mathrm{age}}(t-s)
+  -\eta_{\mathrm{drift}}\,[D_i(t)-D_i(s)]_+
+ \right),
+ \label{eq:weight}
+\]
+where \(D_i(t)\) is the cumulative bounded drift signal. The default gain estimator is a weighted mean; the code also exposes winsorized, upper-tail, and quantile estimators as alternatives. Regime memory stores candidate gains with hidden-state signatures. When a sufficiently similar signature recurs, the corresponding historical gain can enter the estimator as a similarity-weighted pseudo-observation rather than as a new observation.
+
+\subsection{Ranked evidence gate for deployment}
+
+Shadow evaluation and deployment are separate decisions. For each eligible candidate, the controller computes a deployment score that subtracts transfer and switching costs from its estimated gain. Under the evidence configuration, the score is
+\[
+ s_{i,t}(c)
+ =
+ \widehat{\mu}_{i,t}(c)
+ - \lambda_{\mathrm{transfer}}C_{i,t}^{\mathrm{transfer}}(c)
+ - \lambda_{\mathrm{switch}}\,
+   \mathbb{I}\{c\ne c_{i,t-1}\}
+ - m_{\mathrm{switch}}\,
+   \mathbb{I}\{c\ne c_{i,t-1}\},
+ \label{eq:deployscore}
+\]
+where \(c_{i,t-1}\) is the currently deployed capsule and \(m_{\mathrm{switch}}\) is an optional switching margin. The local model is the fallback action.
+
+The \texttt{ranked} gate sorts candidates by \(s_{i,t}\) and tests them in that order. Let \(g_{i,c,s}\) be the paired gain of candidate \(c\) relative to the local prediction on a released feedback unit. For the latest \(k\) observations, the gate computes
+\[
+ \bar g_{i,c}=\frac{1}{k}\sum_{j=1}^{k}g_j,\qquad
+ T_{i,c}=
+ \begin{cases}
+ \bar g_{i,c}/(s_{i,c}/\sqrt{k}), & s_{i,c}>0,\\
+ +\infty, & s_{i,c}=0\ \text{and}\ \bar g_{i,c}>0,\\
+ -\infty, & \text{otherwise},
+ \end{cases}
+ \label{eq:ttest}
+\]
+where \(s_{i,c}\) is the sample standard deviation of the \(k\) gains. A candidate passes if \(\bar g_{i,c}>0\) and \(T_{i,c}\ge \tau\). The controller deploys the first passing candidate whose deployment score exceeds the local fallback threshold. If no candidate passes, it retains the local model.
+
+For the supplied configuration, \(k=4\) and \(\tau=1\). This threshold is a heuristic t-statistic cutoff, not a calibrated significance level. The checked-in implementation does not expose \(\alpha\), Holm, BH, or a HAC lag for this gate. Consequently, \method's \texttt{ranked} configuration must not be described as controlling FWER or as using a Newey--West covariance estimator. Moreover, because candidates are examined sequentially, any formal multiple-testing guarantee would require a separate derivation and implementation.
+
+\subsection{Causal prequential adaptation}
+
+Let a forecast at origin \(t\) cover \(H\) future steps. Under full-horizon feedback, the complete target is released only after the final horizon label is observable. Under first-step feedback, only the first target coordinate is released at the next origin. The permitted feedback at release time \(r\) is therefore
+\[
+ y_{i,t}^{(r)}
+ =
+ \begin{cases}
+ y_{i,t,1}, & \text{first-step protocol},\\
+ (y_{i,t,1},\ldots,y_{i,t,H}), & \text{full-horizon protocol and }r\ge t+H.
+ \end{cases}
+ \label{eq:prefix}
+\]
+Every online statistic must be computed from \(y_{i,t}^{(r)}\), not from the unreleased suffix.
+
+For an external expert forecast \(f_c(x_{i,t})\) and local forecast \(f_0(x_{i,t})\), the deployed forecast is a convex blend
+\[
+ \widehat y_{i,t}
+ =
+ f_0(x_{i,t})
+ + \alpha_{i,c}
+   \bigl(f_c(x_{i,t})-f_0(x_{i,t})\bigr),
+ \qquad \alpha_{i,c}\in[0,1].
+ \label{eq:blend}
+\]
+The implementation can estimate \(\alpha_{i,c}\) by least-squares projection of the observed residual onto the external-minus-local forecast difference, using only already released targets. Before the minimum calibration count is reached, it uses the configured prior mixing weight. The online optimizer is SGD with client-specific optimizer state; the supplied command uses learning rate \(10^{-4}\), one substep, and first-step targets. Gradient clipping is disabled for the non-ILI configuration and set to 1 for ILI.
+
+\begin{algorithm}[t]
+\caption{Client-side \method\ transfer and prequential update}
+\label{alg:fedtdo}
+\begin{algorithmic}[1]
+\REQUIRE Shared encoder \(\theta_s\), local model \(\phi_i\), capsule registry \(\mathcal R\), probe budget \(B\)
+\FOR{each forecast origin \(t\) at client \(i\)}
+  \STATE Read the latest causally available drift score and regime signature
+  \STATE Retrieve compatible capsules \(\mathcal C_{i,t}\) from \(\mathcal R\)
+  \STATE Rank and shadow-evaluate at most \(B\) candidates using \cref{eq:probe}
+  \STATE Compute candidate deployment scores using \cref{eq:deployscore}
+  \STATE Apply the selected gate; use the local model if none passes
+  \STATE Produce the full \(H\)-step forecast and enqueue its counterfactual predictions
+  \STATE When a feedback prefix is released, crop \emph{all} losses and calibration inputs to that prefix
+  \STATE Update the controller history and regime memory from released paired gains only
+  \STATE Optionally take the configured SGD update on the released prefix
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{Causality invariant.}
+The last three operations in \cref{alg:fedtdo} must consume only the released prefix. In particular, candidate gains, the alpha calibration statistics, and expert-ranking observations must be truncated at the same release boundary as the online SGD target. This is a requirement of the method, not merely a property of how the gradient update is formed. The audit in the supplementary repository file documents a violation of this invariant in the currently inspected \texttt{main} revision; first-step results from that revision are not valid evidence for the causal protocol until the feedback path is corrected and rerun.
+
+\section{Experimental Protocol}
+
+\subsection{Federated partition and temporal splits}
+
+The primary supplied examples use channel partitioning: one univariate channel per client, with seven clients for ETTh1 and ILI. For ECL and Traffic, the supplied baseline example uses 32 clients. When a dataset contains more channels than the requested number of clients, the current data loader uses a seeded random subset by default; using the first columns requires explicitly selecting the \texttt{head} sampling mode.
+
+The channel-partitioned data loader uses chronological 70/10/20 train/validation/test splits. The validation and test partitions include the preceding \(L\) observations as context, and each client's standard scaler is fit on its training slice only. Validation is used for epoch-mode early stopping; the online evaluation split defaults to test. Hyperparameter selection on the same online test stream that is ultimately reported would invalidate the test-set interpretation; the implementation exposes a validation-stream option for selection runs.
+
+The supplied ETTh1 example uses \(L=96\), label length 48, and \(H=96\). The supplied ILI example uses \(L=36\), label length 18, and \(H\in\{24,36,48,60\}\). The ILI command shown in the experiment notes is the \(H=24\) cell; the other three horizons require separate runs with the prediction length changed.
+
+\subsection{Optimization and online stream}
+
+The ETTh1 configuration specifies \(d_{\mathrm{model}}=128\), dropout 0.4, patch length 48, stride 12, batch size 256, and training learning rate \(1.2\times10^{-3}\). The ILI configuration specifies \(d_{\mathrm{model}}=512\), dropout 0.1, patch length 24, stride 4, batch size 64, and learning rate \(3\times10^{-4}\). Both use seed 2021, one channel per client, one encoder synchronization round, five warm-up epochs, up to 60 downstream epochs, and patience 15. The learning-rate schedule is type3 for ETTh1 and type1 for ILI. Online SGD uses learning rate \(10^{-4}\), batch size one, and one substep. The supplied ILI configuration clips the online gradient norm at 1; ETTh1 leaves it unclipped.
+
+The \texttt{fedtdo\_online\_steps} parameter is a per-client upper bound on the number of stream batches, not a promise that every dataset supplies that many windows. A stream terminates when its loader is exhausted. With \texttt{fedtdo\_stream\_batch=1}, each served batch is one forecast origin. The paper should report the actual per-client counts from the saved run summaries, especially for ILI.
+
+\subsection{Baselines and metrics}
+
+The supplied baseline example invokes FedProx on ECL with 32 clients, five federated rounds, and 12 local epochs per round. Its online stream uses the same first-step intention, stream batch one, and learning rate \(10^{-4}\). The baseline command is an ECL experiment, not an ETTh1 run. Moreover, its five communication rounds are not identical to the one-shot patch-embedding synchronization in the supplied FedTDO configuration. Results should therefore report the exact aggregation schedule and local epoch budget rather than describing the two schedules as identical.
+
+We report MSE and MAE for every client, together with the macro-average over clients. Pooled metrics may also be included but must be labelled separately from macro-averages. For online comparisons, the number of served windows, target-release rule, optimizer, learning rate, clipping rule, and evaluation split must match across methods. Communication reporting should include uploaded capsule bytes, downloaded capsule bytes, encoder synchronization bytes, number of expert evaluations, and number of switches. Runtime should be measured separately from the deterministic FLOP/byte cost proxy.
+
+\subsection{Results}
+
+\paragraph{Reporting status.}
+No raw experiment logs or result tables were present in the inspected repository snapshot. We therefore do not insert numerical results, rankings, confidence intervals, or claims of improvement here. The entries below are placeholders to be populated only after rerunning the corrected protocol and collecting per-window and per-client records.
+
+\begin{table}[t]
+\caption{Main forecasting results. Replace all placeholders with measured values from the same causal protocol.}
+\label{tab:main-results}
+\centering
+\small
+\begin{tabular}{llrrrr}
+\toprule
+Dataset & \(H\) & FedProx MSE & FedTDO MSE & FedProx MAE & FedTDO MAE\\
+\midrule
+ETTh1 & 96 & \TBD & \TBD & \TBD & \TBD\\
+ILI & 24 & \TBD & \TBD & \TBD & \TBD\\
+ILI & 36 & \TBD & \TBD & \TBD & \TBD\\
+ILI & 48 & \TBD & \TBD & \TBD & \TBD\\
+ILI & 60 & \TBD & \TBD & \TBD & \TBD\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A complete evaluation should additionally include (i) local-only and transfer-disabled controls, (ii) a frozen versus no-freeze encoder comparison, (iii) a no-FedAvg encoder control, (iv) drift-disabled and regime-memory-disabled variants, (v) probe budgets \(B\in\{1,2,4,8\}\), (vi) LCB, posterior, and evidence deployment rules, and (vii) an online-adaptation-off control. These experiments separate the value of representation sharing, transfer, drift-aware forgetting, evidence gating, and online adaptation.
+
+\section{Discussion and Limitations}
+
+\paragraph{Statistical interpretation.}
+The \texttt{ranked} evidence gate is a practical ranking-and-screening heuristic. A threshold of \(T\ge1\) is not a conventional 5\% significance test, and sequentially testing multiple candidates without multiplicity correction does not establish FWER control. The implementation's evidence statistic uses the latest \(k\) observations and an ordinary sample variance; it does not implement HAC standard errors. Claims about calibrated error probabilities require new theory and tests beyond this implementation.
+
+\paragraph{Representation compatibility.}
+Capsules are reusable only across clients that share compatible embedding dimensions, patch geometry, layer indices, and encoder versions. The one-channel-per-client protocol also deliberately suppresses cross-variate interactions inside each client. These restrictions make capsule materialization well-defined but limit the range of transferable structure.
+
+\paragraph{Privacy and systems assumptions.}
+Raw series remain local in the simulated coordinator, but model parameters and expert state are communicated. The framework does not provide differential privacy, secure aggregation, encryption, or a formal inference-time privacy guarantee. A deployment would need to specify authentication, transport security, server trust, retention, and client participation policies.
+
+\paragraph{Implementation status.}
+The command notes supplied with this draft do not parse against the inspected \texttt{main} branch without correction: the control option is \texttt{--fedtdo\_control}, and the evidence-alpha, HAC-lag, and rank-stat options are absent. In addition, the supplied no-freeze control is not the canonical frozen-encoder method, and the current first-step feedback path computes full-horizon candidate gains at the first-step release time. These issues are itemized in \texttt{paper/REPRODUCIBILITY\_AUDIT.md}. They must be resolved before the results table can support a submission.
+
+\section*{Impact Statement}
+
+This work studies a federated forecasting system intended for settings where data are distributed across clients and may be non-stationary. Selective sharing may reduce the need to exchange complete models, but it does not by itself ensure privacy or eliminate risks from model updates and expert parameters. Forecasting errors can affect downstream decisions in domains such as energy, transportation, and public health; deployments should therefore retain domain-specific validation, monitoring, fallback behavior, and human oversight. The current implementation is an experimental research prototype and should not be used as the sole basis for high-impact operational decisions.
+
+\bibliography{fedtdo_icml2026}
+\bibliographystyle{icml2026}
+
+\appendix
+
+\section{Command-to-Method Mapping}
+
+\Cref{tab:config} maps the supplied configuration to the implementation. The table describes the intended settings; the accompanying audit file distinguishes settings that are currently executable from those that are not.
+
+\begin{table*}[t]
+\caption{Supplied experiment settings and their intended role.}
+\label{tab:config}
+\centering
+\small
+\begin{tabular}{p{0.31\linewidth}p{0.22\linewidth}p{0.39\linewidth}}
+\toprule
+Argument group & Value in supplied runs & Role\\
+\midrule
+Partition & \texttt{channel}, 7 clients, 1 channel/client & One univariate series per client. ECL/Traffic baseline example uses 32 clients.\\
+Federated modules & \texttt{patch\_embedding} & Only the patch embedding is synchronized; other modules remain local.\\
+Training budget & one encoder round, 5 warm-up epochs, up to 60 downstream epochs & One encoder synchronization after warm-up, followed by local downstream training. This is not five rounds of 12 local epochs.\\
+Control variant & \texttt{fedtdo\_nofreeze} in the supplied command text & Diagnostic variant that leaves the averaged module trainable; canonical method uses \texttt{fedtdo}.\\
+Probe budget & \(B=4\) & At most four shadow-probe candidates per origin; deployment of the active candidate may add another forward evaluation.\\
+Stream protocol & batch size 1, up to 1920 batches/client & One forecast origin per stream batch; 1920 is a per-client cap, subject to loader exhaustion.\\
+Online adaptation & SGD, \(10^{-4}\), one substep & Update on released labels; ETTh1 no clipping, ILI norm clipping at 1.\\
+Feedback target & \texttt{first} & Intended to release only the first horizon label at the next origin. All controller and calibration feedback must obey the same prefix.\\
+Evidence decision & \texttt{evidence}, \texttt{ranked}, \(k=4\), \(\tau=1\) & Rank candidates and deploy the first passing recent-gain t-statistic check. No FWER guarantee.\\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\section{Reproduction Checklist}
+
+Before filling \cref{tab:main-results}, verify all of the following:
+\begin{enumerate}
+  \item The command line contains only options accepted by the exact repository commit used for the run.
+  \item The main method uses the intended encoder-freezing behavior; any no-freeze result is named and reported as a separate control.
+  \item First-step feedback is truncated consistently for SGD, counterfactual losses, expert gains, alpha calibration, controller history, and regime memory. Alternatively, use full-horizon feedback and delay all such updates until the entire target is available.
+  \item The online stream count is reported per client from the actual run, not copied from the configured upper bound.
+  \item FedTDO and each baseline use the same data split, forecast-origin count, feedback rule, target prefix, online optimizer, and online learning-rate budget when making a direct online comparison.
+  \item The paper recorder is enabled and the raw per-window, feedback, update, candidate-evaluation, transfer, communication, and cost records are retained.
+  \item All tables are regenerated from raw records with scripts that validate coverage and aggregation, and no result is manually typed from a console summary.
+\end{enumerate}
+
+\section{Implementation-Level Notes}
+
+The current controller's \texttt{ranked} gate uses a recent-window one-sided t statistic with a fixed threshold. It is not a p-value threshold, and the parser does not expose an evidence \(\alpha\), HAC lag, or rank-statistic option. The default score estimator is the recency- and drift-weighted mean. The default online reward basis is the local/external blended forecast with relative gain normalization. The current client evaluates the active capsule in addition to the probe set when the active capsule was not itself selected as a probe.
+
+The first-step causality issue is especially important. In the current code, the online SGD routine slices the target to its first element, but the subsequent feedback resolver and alpha-calibration routine receive the untruncated target tensor. Thus later horizon labels can influence the controller before they are available. This draft defines the intended causal method, but it does not certify the inspected implementation as a correct realization of that method.
